@@ -98,6 +98,11 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
     sed -i 's|^#include "feature/avc_spoof.h"$|#include "feature/avc_spoof.h"\n#include "feature/sucompat.h"\n#include "hook/setuid_hook.h"|' "$FOLKSU_INIT"
   fi
 
+  # 4a2) 补回 lsm_hook 头文件（补丁删除了该 include，而调用已恢复）
+  if ! grep -q '#include "hook/lsm_hook.h"' "$FOLKSU_INIT"; then
+    sed -i 's|^#include "hook/setuid_hook.h"$|#include "hook/setuid_hook.h"\n#include "hook/lsm_hook.h"|' "$FOLKSU_INIT"
+  fi
+
   # 4b) SUSFS 初始化（补丁已在 init.c 顶部加入 susfs.h 头文件）
   if ! grep -q 'susfs_init();' "$FOLKSU_INIT"; then
     sed -i 's|^[[:space:]]*ksu_feature_init();$|#ifdef CONFIG_KSU_SUSFS\n    susfs_init();\n#endif // #ifdef CONFIG_KSU_SUSFS\n    ksu_feature_init();|' "$FOLKSU_INIT"
@@ -125,6 +130,7 @@ KSU_KBUILD_EOF
     || ! grep -q 'ksu_init_symbol_resolver();' "$FOLKSU_INIT" \
     || ! grep -q 'ksu_lsm_hook_init();' "$FOLKSU_INIT" \
     || ! grep -q 'ksu_lsm_hook_exit();' "$FOLKSU_INIT" \
+    || ! grep -q '#include "hook/lsm_hook.h"' "$FOLKSU_INIT" \
     || ! grep -q '^bool ksu_late_loaded;' "$FOLKSU_INIT" \
     || ! grep -q 'extern bool ksu_late_loaded;' "$FOLKSU_KSU_H" \
     || ! grep -q 'hook/lsm_hook.o' "$FOLKSU_KSU/Kbuild" \
