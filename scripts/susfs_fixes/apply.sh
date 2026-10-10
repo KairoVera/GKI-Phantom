@@ -95,6 +95,16 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
     sed -i 's|^[[:space:]]*ksu_supercalls_init();$|    ksu_supercalls_init();\n\n    ksu_sucompat_init();\n\n    ksu_setuid_hook_init();|' "$FOLKSU_INIT"
   fi
 
+  # 5) 部分应用的补丁会残留少量 unused 代码（如 selinux_hide.c），
+  #    GKI 的 -Werror 下放行该告警类别，避免遗留代码阻断编译
+  if ! grep -q 'Wno-error=unused-variable' "$FOLKSU_KSU/Kbuild"; then
+    cat >> "$FOLKSU_KSU/Kbuild" << 'KSU_KBUILD_EOF'
+
+# FolkSU: SUSFS 补丁部分应用后的残留代码允许 unused 类告警
+ccflags-y += -Wno-error=unused-variable -Wno-error=unused-function -Wno-error=unused-but-set-variable -Wno-error=unused-const-variable
+KSU_KBUILD_EOF
+  fi
+
   # 结果校验，防止上游代码结构变化后静默失效
   if ! grep -q 'susfs_init();' "$FOLKSU_INIT" \
     || ! grep -q 'ksu_sucompat_init();' "$FOLKSU_INIT" \
