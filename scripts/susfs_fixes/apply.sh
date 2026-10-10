@@ -44,8 +44,8 @@ esac
 
 # FolkSU: 10_enable_susfs_for_ksu.patch 与 FolkSU 的分支代码存在上下文差异，
 # 部分 hunk 未应用（init.c / selinux_hide.c 等），这里按补丁意图完成缺失的适配：
-#   0) selinux_hide.c 回退为原始版本（混合状态会在 LTO 链接时产生符号问题），
-#      并恢复其依赖的基础模块（symbol_resolver / patch_memory / lsm_hook）
+#   0) selinux_hide.c 回退为原始版本，恢复其依赖的基础模块，并把 SUSFS 内核补丁
+#      以 extern 引用的 6 个符号改为全局定义（与 BakaSU 的 __maybe_static 行为一致）
 #   1) 移除指向已移出编译列表模块的调用
 #   2) 恢复补丁删除、但 FolkSU 其余代码仍在使用的全局变量
 #   3) 移除已被补丁整体删除的 ksu_app_profile_init 调用
@@ -62,9 +62,29 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
   # 0) 回退 selinux_hide.c，并恢复其依赖的基础模块进入编译列表
   if git -C "$KERNEL_ROOT/KernelSU" rev-parse --git-dir > /dev/null 2>&1; then
     git -C "$KERNEL_ROOT/KernelSU" checkout -- kernel/feature/selinux_hide.c
+    if ! git -C "$KERNEL_ROOT/KernelSU" diff --quiet -- kernel/feature/selinux_hide.c; then
+      echo "::error::FolkSU selinux_hide.c 未能回退为原始版本" >&2
+      exit 1
+    fi
   fi
   if ! grep -q 'hook/lsm_hook.o' "$FOLKSU_KSU/Kbuild"; then
     sed -i 's|^kernelsu-objs += hook/setuid_hook.o$|kernelsu-objs += hook/setuid_hook.o\nkernelsu-objs += hook/lsm_hook.o\nkernelsu-objs += infra/symbol_resolver.o\n\nifeq ($(CONFIG_ARM64),y)\nkernelsu-objs += hook/arm64/patch_memory.o\nelse ifeq ($(CONFIG_X86_64),y)\nkernelsu-objs += hook/x86_64/patch_memory.o\nelse ifeq ($(CONFIG_RISCV),y)\nkernelsu-objs += hook/riscv64/patch_memory.o\nendif|' "$FOLKSU_KSU/Kbuild"
+  fi
+
+  # 0b) SUSFS 内核补丁在 security/selinux/*.c 中以 extern 引用了 6 个符号
+  #     （fake_state / fake_status / fake_status_initialize_key / initialize_fake_status /
+  #      ksu_selinux_hide_enabled / ksu_selinux_hide_running），需与 BakaSU 一致改为
+  #     全局定义，否则 ThinLTO 链接阶段会报 undefined symbol
+  FOLKSU_SELINUX_HIDE="$FOLKSU_KSU/feature/selinux_hide.c"
+  if grep -q '^static bool ksu_selinux_hide_enabled ' "$FOLKSU_SELINUX_HIDE"; then
+    sed -i \
+      -e 's|^static bool ksu_selinux_hide_enabled |bool ksu_selinux_hide_enabled |' \
+      -e 's|^static bool ksu_selinux_hide_running |bool ksu_selinux_hide_running |' \
+      -e 's|^static struct selinux_state fake_state;|struct selinux_state fake_state;|' \
+      -e 's|^static DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);|DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);|' \
+      -e 's|^static struct page \*fake_status = NULL;|struct page *fake_status = NULL;\nvoid initialize_fake_status(void);|' \
+      -e 's|^static void initialize_fake_status()|void initialize_fake_status(void)|' \
+      "$FOLKSU_SELINUX_HIDE"
   fi
 
   # 1) 移除已不参与编译的模块的调用（仅剩 syscall hook / syscall hook manager）
@@ -134,17 +154,18 @@ KSU_KBUILD_EOF
     || ! grep -q '^bool ksu_late_loaded;' "$FOLKSU_INIT" \
     || ! grep -q 'extern bool ksu_late_loaded;' "$FOLKSU_KSU_H" \
     || ! grep -q 'hook/lsm_hook.o' "$FOLKSU_KSU/Kbuild" \
-    || ! grep -q 'infra/symbol_resolver.o' "$FOLKSU_KSU/Kbuild"; then
+    || ! grep -q 'infra/symbol_resolver.o' "$FOLKSU_KSU/Kbuild" \
+    || ! grep -q '^bool ksu_selinux_hide_enabled ' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^bool ksu_selinux_hide_running ' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^struct selinux_state fake_state;' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^struct page \*fake_status = NULL;' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^void initialize_fake_status(void)$' "$FOLKSU_SELINUX_HIDE"; then
     echo "::error::FolkSU 适配修复失败，代码结构可能已变化" >&2
     exit 1
   fi
   if grep -qE 'ksu_syscall_hook_init\(\)|ksu_syscall_hook_manager_(init|exit)\(\)' "$FOLKSU_INIT"; then
     echo "::error::FolkSU init.c 仍存在指向已移除模块的调用" >&2
-    exit 1
-  fi
-  if git -C "$KERNEL_ROOT/KernelSU" rev-parse --git-dir > /dev/null 2>&1 \
-    && ! git -C "$KERNEL_ROOT/KernelSU" diff --quiet -- kernel/feature/selinux_hide.c; then
-    echo "::error::FolkSU selinux_hide.c 未能回退为原始版本" >&2
     exit 1
   fi
 fi
