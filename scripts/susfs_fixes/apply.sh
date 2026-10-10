@@ -71,10 +71,15 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
     sed -i 's|^kernelsu-objs += hook/setuid_hook.o$|kernelsu-objs += hook/setuid_hook.o\nkernelsu-objs += hook/lsm_hook.o\nkernelsu-objs += infra/symbol_resolver.o\n\nifeq ($(CONFIG_ARM64),y)\nkernelsu-objs += hook/arm64/patch_memory.o\nelse ifeq ($(CONFIG_X86_64),y)\nkernelsu-objs += hook/x86_64/patch_memory.o\nelse ifeq ($(CONFIG_RISCV),y)\nkernelsu-objs += hook/riscv64/patch_memory.o\nendif|' "$FOLKSU_KSU/Kbuild"
   fi
 
-  # 0b) SUSFS 内核补丁在 security/selinux/*.c 中以 extern 引用了 6 个符号
-  #     （fake_state / fake_status / fake_status_initialize_key / initialize_fake_status /
-  #      ksu_selinux_hide_enabled / ksu_selinux_hide_running），需与 BakaSU 一致改为
-  #     全局定义，否则 ThinLTO 链接阶段会报 undefined symbol
+  # 0b) SUSFS 内核补丁在 security/selinux/*.c 中以 extern 引用了这些符号，需与 BakaSU 一致
+  #     改为全局定义，否则 ThinLTO 链接阶段会报 undefined symbol。
+  #     - 6 个通用符号（>=5.10 用到）：
+  #       fake_state / fake_status / fake_status_initialize_key / initialize_fake_status /
+  #       ksu_selinux_hide_enabled / ksu_selinux_hide_running
+  #     - 3 个 6.6 才用到的函数（android15-6.6 主补丁在 security/selinux/* 中 extern 引用，
+  #       5.15/6.1 用不到，所以之前只在 6.6 上暴露为链接失败）：
+  #       security_context_to_sid_with_policy / security_sid_to_context_with_policy /
+  #       security_compute_av_user_with_policy
   FOLKSU_SELINUX_HIDE="$FOLKSU_KSU/feature/selinux_hide.c"
   if grep -q '^static bool ksu_selinux_hide_enabled ' "$FOLKSU_SELINUX_HIDE"; then
     sed -i \
@@ -84,6 +89,10 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
       -e 's|^static DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);|DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);|' \
       -e 's|^static struct page \*fake_status = NULL;|struct page *fake_status = NULL;\nvoid initialize_fake_status(void);|' \
       -e 's|^static void initialize_fake_status()|void initialize_fake_status(void)|' \
+      -e 's|^static int security_context_to_sid_with_policy|int security_context_to_sid_with_policy|' \
+      -e 's|^static int security_sid_to_context_with_policy|int security_sid_to_context_with_policy|' \
+      -e 's|^static void security_compute_av_user_with_policy|void security_compute_av_user_with_policy|' \
+      -e 's|^static void __nocfi security_compute_av_user_with_policy|void __nocfi security_compute_av_user_with_policy|' \
       "$FOLKSU_SELINUX_HIDE"
   fi
 
@@ -241,8 +250,15 @@ KSU_KBUILD_EOF
     || ! grep -q '^struct selinux_state fake_state;' "$FOLKSU_SELINUX_HIDE" \
     || ! grep -q '^DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key);' "$FOLKSU_SELINUX_HIDE" \
     || ! grep -q '^struct page \*fake_status = NULL;' "$FOLKSU_SELINUX_HIDE" \
-    || ! grep -q '^void initialize_fake_status(void)$' "$FOLKSU_SELINUX_HIDE"; then
+    || ! grep -q '^void initialize_fake_status(void)$' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^int security_context_to_sid_with_policy' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^int security_sid_to_context_with_policy' "$FOLKSU_SELINUX_HIDE" \
+    || ! grep -q '^void security_compute_av_user_with_policy' "$FOLKSU_SELINUX_HIDE"; then
     echo "::error::FolkSU 适配修复失败，代码结构可能已变化" >&2
+    exit 1
+  fi
+  if grep -qE '^static (int|void) (__nocfi )?security_(context_to_sid_with_policy|sid_to_context_with_policy|compute_av_user_with_policy)' "$FOLKSU_SELINUX_HIDE"; then
+    echo "::error::FolkSU selinux_hide.c 的 security_*_with_policy 仍未全局化（6.6 会链接失败）" >&2
     exit 1
   fi
   if grep -qE 'ksu_syscall_hook_init\(\)|ksu_syscall_hook_manager_(init|exit)\(\)' "$FOLKSU_INIT"; then
