@@ -42,17 +42,22 @@ case "$KSU_VARIANT" in
     ;;
 esac
 
-# FolkSU: 10_enable_susfs_for_ksu.patch 将部分 hook 目标文件移出了编译列表，
-# 但补丁中的 init.c 调整与 FolkSU 的分支代码上下文不一致（hunk 未应用），
-# 这里按补丁意图移除悬空调用，并补齐新架构所需的初始化
+# FolkSU: 10_enable_susfs_for_ksu.patch 与 FolkSU 的分支代码存在上下文差异，
+# 部分 hunk 未应用（init.c 等），这里按补丁意图完成缺失的适配：
+#   1) 移除指向已移出编译列表模块的调用
+#   2) 恢复补丁删除、但 FolkSU 其余代码仍在使用的全局变量
+#   3) 移除已被补丁整体删除的 ksu_app_profile_init 调用
+#   4) 补齐头文件声明、SUSFS 初始化与新架构初始化调用
 if [ "$KSU_VARIANT" == "FolkSU" ]; then
-  FOLKSU_INIT="$KERNEL_ROOT/KernelSU/kernel/core/init.c"
-  if [ ! -f "$FOLKSU_INIT" ]; then
-    echo "::error::未找到 FolkSU init.c: $FOLKSU_INIT" >&2
+  FOLKSU_KSU="$KERNEL_ROOT/KernelSU/kernel"
+  FOLKSU_INIT="$FOLKSU_KSU/core/init.c"
+  FOLKSU_KSU_H="$FOLKSU_KSU/include/ksu.h"
+  if [ ! -f "$FOLKSU_INIT" ] || [ ! -f "$FOLKSU_KSU_H" ]; then
+    echo "::error::未找到 FolkSU 内核源码文件 (core/init.c / include/ksu.h)" >&2
     exit 1
   fi
 
-  # 移除已不参与编译的模块的调用（symbol_resolver / syscall hook / lsm hook / syscall hook manager）
+  # 1) 移除已不参与编译的模块的调用（symbol_resolver / syscall hook / lsm hook / syscall hook manager）
   sed -i \
     -e '/^[[:space:]]*ksu_init_symbol_resolver();$/d' \
     -e '/^[[:space:]]*ksu_syscall_hook_init();$/d' \
@@ -61,15 +66,31 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
     -e '/^[[:space:]]*ksu_syscall_hook_manager_exit();$/d' \
     "$FOLKSU_INIT"
 
-  # 接入 SUSFS 头文件与初始化
-  if ! grep -q '#include <linux/susfs.h>' "$FOLKSU_INIT"; then
-    sed -i '0,/^#include "ksu.h"$/s|^#include "ksu.h"$|#include "ksu.h"\n#include <linux/susfs.h>|' "$FOLKSU_INIT"
+  # 3) ksu_app_profile_init 已被补丁从 app_profile.c/h 整体删除，去掉残留调用
+  if ! grep -q 'void __init ksu_app_profile_init(' "$FOLKSU_KSU/policy/app_profile.c"; then
+    sed -i '/^[[:space:]]*ksu_app_profile_init();$/d' "$FOLKSU_INIT"
   fi
+
+  # 2) 恢复 ksu_late_loaded / ksu_bundled（补丁从 ksu.h 与 init.c 删除，
+  #    但 FolkSU 的 dispatch / selinux_hide / ksud_integration 仍在使用）
+  if ! grep -q 'extern bool ksu_late_loaded;' "$FOLKSU_KSU_H"; then
+    sed -i 's|^extern bool ksu_no_custom_rc;$|extern bool ksu_no_custom_rc;\nextern bool ksu_late_loaded;\nextern bool ksu_bundled;|' "$FOLKSU_KSU_H"
+  fi
+  if ! grep -q '^bool ksu_late_loaded;' "$FOLKSU_INIT"; then
+    sed -i 's|^struct cred \*ksu_cred;$|struct cred *ksu_cred;\n\nbool ksu_late_loaded;\n\n#ifdef MODULE\nbool ksu_bundled = false;\nmodule_param_named(bundled, ksu_bundled, bool, 0);\n#endif|' "$FOLKSU_INIT"
+  fi
+
+  # 4a) 补齐新架构初始化函数的头文件声明
+  if ! grep -q '#include "feature/sucompat.h"' "$FOLKSU_INIT"; then
+    sed -i 's|^#include "feature/avc_spoof.h"$|#include "feature/avc_spoof.h"\n#include "feature/sucompat.h"\n#include "hook/setuid_hook.h"|' "$FOLKSU_INIT"
+  fi
+
+  # 4b) SUSFS 初始化（补丁已在 init.c 顶部加入 susfs.h 头文件）
   if ! grep -q 'susfs_init();' "$FOLKSU_INIT"; then
     sed -i 's|^[[:space:]]*ksu_feature_init();$|#ifdef CONFIG_KSU_SUSFS\n    susfs_init();\n#endif // #ifdef CONFIG_KSU_SUSFS\n    ksu_feature_init();|' "$FOLKSU_INIT"
   fi
 
-  # 原先由 hook/syscall_hook_manager.c 代调用的初始化，改为 init.c 直接调用
+  # 4c) 原先由 hook/syscall_hook_manager.c 代调用的初始化，改为 init.c 直接调用
   if ! grep -q 'ksu_sucompat_init();' "$FOLKSU_INIT"; then
     sed -i 's|^[[:space:]]*ksu_supercalls_init();$|    ksu_supercalls_init();\n\n    ksu_sucompat_init();\n\n    ksu_setuid_hook_init();|' "$FOLKSU_INIT"
   fi
@@ -77,8 +98,10 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
   # 结果校验，防止上游代码结构变化后静默失效
   if ! grep -q 'susfs_init();' "$FOLKSU_INIT" \
     || ! grep -q 'ksu_sucompat_init();' "$FOLKSU_INIT" \
-    || ! grep -q 'ksu_setuid_hook_init();' "$FOLKSU_INIT"; then
-    echo "::error::FolkSU init.c 修复失败，代码结构可能已变化" >&2
+    || ! grep -q 'ksu_setuid_hook_init();' "$FOLKSU_INIT" \
+    || ! grep -q '^bool ksu_late_loaded;' "$FOLKSU_INIT" \
+    || ! grep -q 'extern bool ksu_late_loaded;' "$FOLKSU_KSU_H"; then
+    echo "::error::FolkSU 适配修复失败，代码结构可能已变化" >&2
     exit 1
   fi
   if grep -qE 'ksu_init_symbol_resolver\(\)|ksu_syscall_hook_init\(\)|ksu_lsm_hook_init\(\)|ksu_syscall_hook_manager_(init|exit)\(\)' "$FOLKSU_INIT"; then
