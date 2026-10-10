@@ -36,6 +36,7 @@ on:
           - SukiSU(40726)
           - SukiSU(40548)
           - BakaSU
+          - FolkSU
           - Official
           #- Next
         default: BakaSU
@@ -565,6 +566,7 @@ jobs:
             "Official")  KSU_NAME="KernelSU" ;;
             "SukiSU")    KSU_NAME="SukiSU" ;;
             "BakaSU")  KSU_NAME="BakaSU" ;;
+            "FolkSU")  KSU_NAME="FolkSU" ;;
           esac
           echo "KSU_NAME=$KSU_NAME" >> $GITHUB_ENV
 
@@ -659,6 +661,7 @@ jobs:
               fi
               ;;
             "BakaSU") BRANCH="main" ;;
+            "FolkSU") BRANCH="master" ;;
             "Next") BRANCH="dev" ;;
             *) echo "错误: 未知变体" >&2; exit 1 ;;
           esac
@@ -673,6 +676,7 @@ jobs:
             "Next") REPO_URL="https://github.com/KernelSU-Next/KernelSU-Next.git"; REPO_URL2="KernelSU-Next/KernelSU-Next" ;;
             "SukiSU") REPO_URL="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"; REPO_URL2="SukiSU-Ultra/SukiSU-Ultra" ;;
             "BakaSU") REPO_URL="https://github.com/Baka-SU/BakaSU.git"; REPO_URL2="Baka-SU/BakaSU" ;;
+            "FolkSU") REPO_URL="https://github.com/LyraVoid/FolkSU.git"; REPO_URL2="LyraVoid/FolkSU" ;;
           esac
 
           if [ "${{ inputs.kernelsu_variant }}" = "SukiSU" ] && [ -f "config/config" ]; then

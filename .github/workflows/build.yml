@@ -542,6 +542,9 @@ jobs:
             "Official"|"BakaSU")
               BRANCH="-s main"
               ;;
+            "FolkSU")
+              BRANCH="-s master"
+              ;;
             "SukiSU")
               if [ "${{ inputs.enable_susfs }}" = "false" ]; then
                 BRANCH="-s main"
@@ -612,6 +615,17 @@ jobs:
             "BakaSU")
               echo "添加 BakaSU..."
               curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash $BRANCH
+              ;;
+            "FolkSU")
+              echo "添加 FolkSU..."
+              git clone https://github.com/LyraVoid/FolkSU.git KernelSU
+              git -C KernelSU checkout master
+              # FolkSU 上游的 kernel/setup.sh 仍会克隆 tiann/KernelSU，这里按 setup.sh 的等价步骤手动集成
+              cd common/drivers
+              ln -sf "$(realpath --relative-to="$PWD" "$KERNEL_ROOT/KernelSU/kernel")" kernelsu
+              grep -q "kernelsu" Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> Makefile
+              grep -q 'source "drivers/kernelsu/Kconfig"' Kconfig || sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' Kconfig
+              cd "$KERNEL_ROOT"
               ;;
             *)
               if [ -z "$LEGACY_SUKISU_CONFIG" ]; then

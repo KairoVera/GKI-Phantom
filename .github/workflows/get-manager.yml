@@ -80,6 +80,9 @@ jobs:
           elif [ "${{ inputs.kernelsu_variant }}" == "BakaSU" ]; then
             echo "This is the BakaSU variant"
             git clone https://github.com/Baka-SU/BakaSU.git KernelSU
+          elif [ "${{ inputs.kernelsu_variant }}" == "FolkSU" ]; then
+            echo "This is the FolkSU variant"
+            git clone https://github.com/LyraVoid/FolkSU.git KernelSU
           elif [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
             echo "This is the Official"
             git clone https://github.com/tiann/KernelSU.git KernelSU
@@ -100,6 +103,8 @@ jobs:
             KSU_VERSION=40548
           elif [ "${{ inputs.kernelsu_variant }}" == "BakaSU" ]; then
             KSU_VERSION=$((30700 + KSU_GIT_VERSION))
+          elif [ "${{ inputs.kernelsu_variant }}" == "FolkSU" ]; then
+            KSU_VERSION=$((30000 + KSU_GIT_VERSION))
           elif [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
             KSU_VERSION=$((20000 + KSU_GIT_VERSION))
           elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
@@ -141,6 +146,41 @@ jobs:
               exit 1
             fi
             curl -fL -o "manager-artifacts/$LEGACY_DIR/${LEGACY_DIR}-release.apk" "$MANAGER_URL"
+            exit 0
+          fi
+
+          if [ "${{ inputs.kernelsu_variant }}" == "FolkSU" ]; then
+            echo "下载 FolkSU 管理器（从 Release 选择不高于 KSU $KSU_VERSION 的最新版本）..."
+            mkdir -p "manager-artifacts/FolkSU"
+            BEST_VERSION=0
+            BEST_NAME=""
+            BEST_URL=""
+            for PAGE in 1 2 3 4 5; do
+              RELEASES=$(curl -fsSL -H "Authorization: token $GH_TOKEN" \
+                "https://api.github.com/repos/LyraVoid/FolkSU/releases?per_page=30&page=$PAGE")
+              RELEASE_COUNT=$(printf '%s' "$RELEASES" | jq 'length')
+              if [ "$RELEASE_COUNT" -eq 0 ]; then
+                break
+              fi
+              while IFS=$'\t' read -r NAME URL; do
+                ASSET_VERSION=$(printf '%s' "$NAME" | sed -n 's/^FolkSU_.*_\([0-9][0-9]*\)-release\.apk$/\1/p')
+                if [ -z "$ASSET_VERSION" ]; then
+                  continue
+                fi
+                if [ "$ASSET_VERSION" -le "$KSU_VERSION" ] && [ "$ASSET_VERSION" -gt "$BEST_VERSION" ]; then
+                  BEST_VERSION="$ASSET_VERSION"
+                  BEST_NAME="$NAME"
+                  BEST_URL="$URL"
+                fi
+              done < <(printf '%s' "$RELEASES" | jq -r '.[] | .assets[] | select(.name | endswith("-release.apk")) | [.name, .browser_download_url] | @tsv')
+            done
+            if [ -z "$BEST_URL" ]; then
+              echo "未找到版本不高于 KSU $KSU_VERSION 的 FolkSU 管理器 Release。"
+              exit 1
+            fi
+            echo "选择 FolkSU 管理器: $BEST_NAME (版本 $BEST_VERSION)"
+            curl -fL -o "manager-artifacts/FolkSU/$BEST_NAME" "$BEST_URL"
+            find manager-artifacts -type f -name "*.apk" -print
             exit 0
           fi
 

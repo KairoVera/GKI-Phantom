@@ -30,7 +30,7 @@ cp "$SUSFS4KSU"/kernel_patches/fs/* ./common/fs/
 cp "$SUSFS4KSU"/kernel_patches/include/linux/* ./common/include/linux/
 
 case "$KSU_VARIANT" in
-  "Official")
+  "Official"|"FolkSU")
     cd ./KernelSU
     cp "$SUSFS4KSU"/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
     patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
@@ -41,6 +41,51 @@ case "$KSU_VARIANT" in
     echo "Next/SukiSU/SukiSU(40726)/SukiSU(40548)/BakaSU 使用内置 SUSFS 支持"
     ;;
 esac
+
+# FolkSU: 10_enable_susfs_for_ksu.patch 将部分 hook 目标文件移出了编译列表，
+# 但补丁中的 init.c 调整与 FolkSU 的分支代码上下文不一致（hunk 未应用），
+# 这里按补丁意图移除悬空调用，并补齐新架构所需的初始化
+if [ "$KSU_VARIANT" == "FolkSU" ]; then
+  FOLKSU_INIT="$KERNEL_ROOT/KernelSU/kernel/core/init.c"
+  if [ ! -f "$FOLKSU_INIT" ]; then
+    echo "::error::未找到 FolkSU init.c: $FOLKSU_INIT" >&2
+    exit 1
+  fi
+
+  # 移除已不参与编译的模块的调用（symbol_resolver / syscall hook / lsm hook / syscall hook manager）
+  sed -i \
+    -e '/^[[:space:]]*ksu_init_symbol_resolver();$/d' \
+    -e '/^[[:space:]]*ksu_syscall_hook_init();$/d' \
+    -e '/^[[:space:]]*ksu_lsm_hook_init();$/d' \
+    -e '/^[[:space:]]*ksu_syscall_hook_manager_init();$/d' \
+    -e '/^[[:space:]]*ksu_syscall_hook_manager_exit();$/d' \
+    "$FOLKSU_INIT"
+
+  # 接入 SUSFS 头文件与初始化
+  if ! grep -q '#include <linux/susfs.h>' "$FOLKSU_INIT"; then
+    sed -i '0,/^#include "ksu.h"$/s|^#include "ksu.h"$|#include "ksu.h"\n#include <linux/susfs.h>|' "$FOLKSU_INIT"
+  fi
+  if ! grep -q 'susfs_init();' "$FOLKSU_INIT"; then
+    sed -i 's|^[[:space:]]*ksu_feature_init();$|#ifdef CONFIG_KSU_SUSFS\n    susfs_init();\n#endif // #ifdef CONFIG_KSU_SUSFS\n    ksu_feature_init();|' "$FOLKSU_INIT"
+  fi
+
+  # 原先由 hook/syscall_hook_manager.c 代调用的初始化，改为 init.c 直接调用
+  if ! grep -q 'ksu_sucompat_init();' "$FOLKSU_INIT"; then
+    sed -i 's|^[[:space:]]*ksu_supercalls_init();$|    ksu_supercalls_init();\n\n    ksu_sucompat_init();\n\n    ksu_setuid_hook_init();|' "$FOLKSU_INIT"
+  fi
+
+  # 结果校验，防止上游代码结构变化后静默失效
+  if ! grep -q 'susfs_init();' "$FOLKSU_INIT" \
+    || ! grep -q 'ksu_sucompat_init();' "$FOLKSU_INIT" \
+    || ! grep -q 'ksu_setuid_hook_init();' "$FOLKSU_INIT"; then
+    echo "::error::FolkSU init.c 修复失败，代码结构可能已变化" >&2
+    exit 1
+  fi
+  if grep -qE 'ksu_init_symbol_resolver\(\)|ksu_syscall_hook_init\(\)|ksu_lsm_hook_init\(\)|ksu_syscall_hook_manager_(init|exit)\(\)' "$FOLKSU_INIT"; then
+    echo "::error::FolkSU init.c 仍存在指向已移除模块的调用" >&2
+    exit 1
+  fi
+fi
 
 cd "$KERNEL_ROOT/common"
 CURRENT_SUB="$SUB_LEVEL"
