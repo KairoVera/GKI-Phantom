@@ -629,12 +629,14 @@ jobs:
               FOLKSU_MANAGER_CERT_SIZE="0x02cc"
               FOLKSU_MANAGER_CERT_HASH="2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458"
               FOLKSU_KBUILD="$KERNEL_ROOT/KernelSU/kernel/Kbuild"
+              # 注意：Kbuild 里 "ifdef KSU_EXPECTED_SIZE2" 会出现两次（主块 + FOLKSU_TRUSTED 块内），
+              # 用 0,/re/ 地址范围限定只替换第一处，避免重复注入。
               if grep -q '^ifdef KSU_EXPECTED_SIZE2$' "$FOLKSU_KBUILD"; then
-                sed -i "s|^ifdef KSU_EXPECTED_SIZE2\$|KSU_EXPECTED_SIZE2 := ${FOLKSU_MANAGER_CERT_SIZE}\nKSU_EXPECTED_HASH2 := ${FOLKSU_MANAGER_CERT_HASH}\nKSU_SECOND_SIGNATURE_RELEASE := 1\nifdef KSU_EXPECTED_SIZE2|" "$FOLKSU_KBUILD"
+                sed -i "0,/^ifdef KSU_EXPECTED_SIZE2\$/s|^ifdef KSU_EXPECTED_SIZE2\$|KSU_EXPECTED_SIZE2 := ${FOLKSU_MANAGER_CERT_SIZE}\nKSU_EXPECTED_HASH2 := ${FOLKSU_MANAGER_CERT_HASH}\nKSU_SECOND_SIGNATURE_RELEASE := 1\nifdef KSU_EXPECTED_SIZE2|" "$FOLKSU_KBUILD"
                 echo "已注入 FolkSU 管理器签名(第二槽): size=${FOLKSU_MANAGER_CERT_SIZE} hash=${FOLKSU_MANAGER_CERT_HASH}"
               elif grep -q '^ifndef KSU_EXPECTED_SIZE$' "$FOLKSU_KBUILD"; then
                 # 兼容较老的 FolkSU 提交：没有第二槽时退回第一槽
-                sed -i "s|^ifndef KSU_EXPECTED_SIZE\$|KSU_EXPECTED_SIZE := ${FOLKSU_MANAGER_CERT_SIZE}\nKSU_EXPECTED_HASH := ${FOLKSU_MANAGER_CERT_HASH}\nifndef KSU_EXPECTED_SIZE|" "$FOLKSU_KBUILD"
+                sed -i "0,/^ifndef KSU_EXPECTED_SIZE\$/s|^ifndef KSU_EXPECTED_SIZE\$|KSU_EXPECTED_SIZE := ${FOLKSU_MANAGER_CERT_SIZE}\nKSU_EXPECTED_HASH := ${FOLKSU_MANAGER_CERT_HASH}\nifndef KSU_EXPECTED_SIZE|" "$FOLKSU_KBUILD"
                 echo "已注入 FolkSU 管理器签名(第一槽回退): size=${FOLKSU_MANAGER_CERT_SIZE} hash=${FOLKSU_MANAGER_CERT_HASH}"
               else
                 echo "::error::未在 ${FOLKSU_KBUILD} 找到可用的签名定义块，无法注入 FolkSU 管理器签名"
