@@ -133,6 +133,41 @@ PYEOF
     grep -n 'FOLKSU_SUSFS_OWNS_SELINUXFS' "$FOLKSU_SELINUX_HIDE"
   fi
 
+  # 0d) 保持 seccomp「过滤模式」（与 BakaSU 一致）：simonpunk 的 SUSFS KSU 补丁把
+  #     setuid_hook.c 里的 ksu_seccomp_allow_cache(__NR_reboot) 改成了无条件 disable_seccomp()，
+  #     于是管理器首页 Seccomp 状态显示“未开启”（0）。BakaSU 的做法是 >=5.10 保留过滤模式、
+  #     仅把 reboot 加入 seccomp 白名单；这里改回 BakaSU 的逻辑。
+  if [ -f "$FOLKSU_KSU/hook/setuid_hook.c" ] \
+    && ! grep -q 'FOLKSU_SECCOMP_KEEP_FILTER' "$FOLKSU_KSU/hook/setuid_hook.c" \
+    && grep -q '^        disable_seccomp();$' "$FOLKSU_KSU/hook/setuid_hook.c"; then
+    python3 - "$FOLKSU_KSU/hook/setuid_hook.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+needle = "        disable_seccomp();\n"
+count = src.count(needle)
+if count == 0:
+    print("setuid_hook.c: 未发现无条件 disable_seccomp()，跳过")
+    sys.exit(0)
+repl = (
+    "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) /* FOLKSU_SECCOMP_KEEP_FILTER */\n"
+    "        if (current->seccomp.mode == SECCOMP_MODE_FILTER && current->seccomp.filter) {\n"
+    "            spin_lock_irq(&current->sighand->siglock);\n"
+    "            ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);\n"
+    "            spin_unlock_irq(&current->sighand->siglock);\n"
+    "        }\n"
+    "#else\n"
+    "        disable_seccomp();\n"
+    "#endif\n"
+)
+src = src.replace(needle, repl)
+open(path, "w", encoding="utf-8").write(src)
+print("setuid_hook.c: 已将 %d 处 disable_seccomp() 改回 BakaSU 的 seccomp 白名单/过滤模式" % count)
+PYEOF
+    grep -n 'FOLKSU_SECCOMP_KEEP_FILTER\|ksu_seccomp_allow_cache(current->seccomp.filter' "$FOLKSU_KSU/hook/setuid_hook.c"
+  fi
+
   # 1) 移除已不参与编译的模块的调用（仅剩 syscall hook / syscall hook manager）
   sed -i \
     -e '/^[[:space:]]*ksu_syscall_hook_init();$/d' \
