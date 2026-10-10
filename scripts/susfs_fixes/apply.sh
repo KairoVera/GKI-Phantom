@@ -87,6 +87,52 @@ if [ "$KSU_VARIANT" == "FolkSU" ]; then
       "$FOLKSU_SELINUX_HIDE"
   fi
 
+  # 0c) SUSFS 主补丁已在内核侧接管 selinuxfs：security/selinux/selinuxfs.c 把
+  #     write_op[] 换成它自己的 my_write_access/my_write_context，security/selinux/hooks.c
+  #     注册了 my_setprocattr，并托管 sel_handle_status_ops 的 status 处理。
+  #     KSU 侧 selinux_hide.c 若再安装同名运行时 hook（write_op patch / setprocattr LSM hook /
+  #     status open hook），两套 hook 会互相覆盖；一旦 KSU 侧 patch 失败，ksu_selinux_hide_running
+  #     保持 false，SUSFS 内核代码里 !ksu_selinux_hide_running 的分支就会跳过伪装，
+  #     表现为「隐藏 SELinux 失效」。这里按 SUSFS 设计，让 selinux_hide.c 只提供共享符号，
+  #     不再安装运行时 hook。
+  if ! grep -q 'FOLKSU_SUSFS_OWNS_SELINUXFS' "$FOLKSU_SELINUX_HIDE"; then
+    python3 - "$FOLKSU_SELINUX_HIDE" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+
+# enable(): 在安装 write_op/status/setprocattr hook 之前直接返回，仅保留 <6.6 的 fake_state 设置
+enable_anchor = '    selinux_write_op = find_kernel_symbol_exact("write_op");'
+assert src.count(enable_anchor) == 1, "selinux_hide enable anchor not unique"
+enable_block = (
+    "#ifdef CONFIG_KSU_SUSFS\n"
+    "    /* FOLKSU_SUSFS_OWNS_SELINUXFS: SUSFS 已接管 write_op/status/setprocattr */\n"
+    "#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\n"
+    "    fake_state.initialized = true;\n"
+    "    fake_state.policy = backup_sepolicy;\n"
+    "#endif\n"
+    "    return 0;\n"
+    "#endif\n"
+)
+src = src.replace(enable_anchor, enable_block + enable_anchor, 1)
+
+# unhook(): 没有安装过就不要还原
+unhook_anchor = "static void ksu_selinux_hide_unhook()\n{\n"
+assert src.count(unhook_anchor) == 1, "selinux_hide unhook anchor not unique"
+src = src.replace(unhook_anchor, unhook_anchor + "#ifdef CONFIG_KSU_SUSFS\n    return;\n#endif\n", 1)
+
+# init(): 不再 hook status open（SUSFS 负责）
+init_anchor = "    hook_selinux_status_open();\n}"
+assert src.count(init_anchor) == 1, "selinux_hide init anchor not unique"
+src = src.replace(init_anchor, "#ifndef CONFIG_KSU_SUSFS\n    hook_selinux_status_open();\n#endif\n}", 1)
+
+open(path, "w", encoding="utf-8").write(src)
+print("selinux_hide.c: 已按 SUSFS 归属跳过 KSU 侧运行时 hook")
+PYEOF
+    grep -n 'FOLKSU_SUSFS_OWNS_SELINUXFS' "$FOLKSU_SELINUX_HIDE"
+  fi
+
   # 1) 移除已不参与编译的模块的调用（仅剩 syscall hook / syscall hook manager）
   sed -i \
     -e '/^[[:space:]]*ksu_syscall_hook_init();$/d' \
