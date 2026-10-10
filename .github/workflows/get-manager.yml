@@ -83,6 +83,8 @@ jobs:
           elif [ "${{ inputs.kernelsu_variant }}" == "FolkSU" ]; then
             echo "This is the FolkSU variant"
             git clone https://github.com/LyraVoid/FolkSU.git KernelSU
+            # 固定到 FolkSU v0.1.0-beta3（提交数 2787 → 版本 32787），与最新管理器 Release 对齐
+            git -C KernelSU checkout 6172b71e2e1c12fb3fbf023f310ecac3be041fc5
           elif [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
             echo "This is the Official"
             git clone https://github.com/tiann/KernelSU.git KernelSU

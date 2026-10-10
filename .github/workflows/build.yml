@@ -618,8 +618,10 @@ jobs:
               ;;
             "FolkSU")
               echo "添加 FolkSU..."
+              # 固定到 FolkSU v0.1.0-beta3（提交数 2787 → KSU 版本 32787），与最新管理器 Release 对齐
+              FOLKSU_PINNED_REF="6172b71e2e1c12fb3fbf023f310ecac3be041fc5"
               git clone https://github.com/LyraVoid/FolkSU.git KernelSU
-              git -C KernelSU checkout master
+              git -C KernelSU checkout "$FOLKSU_PINNED_REF"
               # 注入 FolkSU 管理器签名（第二签名槽，与 FolkSU 上游 build.sh 的做法一致）：
               # 内核槽1 默认信任官方 KernelSU 证书(0x033b / c371...d2d6)，槽2 用于附加一个受信任证书。
               # 本仓库随包发布的是 FolkSU 管理器(签名证书 CN=FolkSU)，只有把槽2 指向它并标记为发布密钥，
