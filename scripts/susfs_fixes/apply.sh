@@ -379,45 +379,42 @@ patch -p1 < "$SUSFS_PATCH" || true
 if [ -f security/selinux/selinuxfs.c ] && grep -q 'static ssize_t my_write_context' security/selinux/selinuxfs.c \
   && [ -f security/selinux/hooks.c ] && grep -q 'static int my_setprocattr' security/selinux/hooks.c; then
   python3 - <<'PYEOF'
-import re, sys
+import re
 
-def edit(path, ops):
+def sed(path, name, pat, repl):
     src = open(path, encoding="utf-8", errors="surrogateescape").read()
-    for name, pat, repl, cnt in ops:
-        new, n = re.subn(pat, repl, src, count=cnt)
-        if n != cnt:
-            sys.stderr.write("::error::%s: '%s' matched %d expected %d\n" % (path, name, n, cnt))
-            sys.exit(1)
-        src = new
-    open(path, "w", encoding="utf-8", errors="surrogateescape").write(src)
-    print("%s: applied -> %s" % (path, ", ".join(o[0] for o in ops)))
+    new, n = re.subn(pat, repl, src, count=1)
+    if n == 0:
+        print("::warning::%s: %s not matched (skip)" % (path, name))
+        return
+    open(path, "w", encoding="utf-8", errors="surrogateescape").write(new)
+    print("%s: %s OK" % (path, name))
 
-fs = [
-    ("ctx.sync",
-     r"(\tlength = security_context_to_sid\(&fake_state, buf, size, &sid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-     "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC: sync to global sidtab (KernelSU #3873) */\n\t\tsecurity_context_to_sid(&selinux_state, buf, size, &tmp_sid, GFP_KERNEL);\n\t}\n",
-     1),
-    ("scon.sync",
-     r"(\tlength = security_context_str_to_sid\(&fake_state, scon, &ssid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-     "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, scon, &tmp_sid, GFP_KERNEL);\n\t}\n",
-     1),
-    ("tcon.sync",
-     r"(\tlength = security_context_str_to_sid\(&fake_state, tcon, &tsid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
-     "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, tcon, &tmp_sid, GFP_KERNEL);\n\t}\n",
-     1),
-]
-hk = [
-    ("rm_early_setcurrent",
-     r"\terror = avc_has_perm\(&selinux_state,\n\t\t\t\t     mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL\);\n\n\tif \(error\)\n\t\treturn error;\n\n",
-     "",
-     1),
-    ("seq+sync",
-     r"(\t\terror = security_context_to_sid\(&fake_state, value, size,\n\t\t\t\t\t\t&sid, GFP_KERNEL\);\n)\t\tif \(error\)\n\t\t\treturn error;\n",
-     "\\1\t\tif (error) {\n\t\t\t/* FOLKSU_SEQ: 仅当 backup 解析失败时才做 SETCURRENT 检查（KernelSU df03912f） */\n\t\t\tint perm_error = avc_has_perm(&selinux_state, mysid, mysid,\n\t\t\t\t\t\t      SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n\t\t{\n\t\t\tu32 tmp_sid;\n\t\t\t/* FOLKSU_SIDTAB_SYNC (KernelSU #3873) */\n\t\t\tsecurity_context_to_sid(&selinux_state, value, size, &tmp_sid, GFP_KERNEL);\n\t\t}\n",
-     1),
-]
-edit("security/selinux/selinuxfs.c", fs)
-edit("security/selinux/hooks.c", hk)
+fs = "security/selinux/selinuxfs.c"
+# my_write_context（<6.6 用 fake_state；>=6.6 用 backup_sepolicy 的 _with_policy 解析）
+sed(fs, "ctx(<6.6)", r"(\tlength = security_context_to_sid\(&fake_state, buf, size, &sid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(&selinux_state, buf, size, &tmp_sid, GFP_KERNEL);\n\t}\n")
+sed(fs, "ctx(>=6.6)", r"(\tlength = security_context_to_sid_with_policy\(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(buf, size, &tmp_sid, GFP_KERNEL);\n\t}\n")
+# my_write_access scon / tcon
+sed(fs, "scon(<6.6)", r"(\tlength = security_context_str_to_sid\(&fake_state, scon, &ssid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, scon, &tmp_sid, GFP_KERNEL);\n\t}\n")
+sed(fs, "scon(>=6.6)", r"(\tlength = security_context_to_sid_with_policy\(backup_sepolicy, scon, strlen\(scon\), &ssid, SECSID_NULL, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(scon, strlen(scon), &tmp_sid, GFP_KERNEL);\n\t}\n")
+sed(fs, "tcon(<6.6)", r"(\tlength = security_context_str_to_sid\(&fake_state, tcon, &tsid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, tcon, &tmp_sid, GFP_KERNEL);\n\t}\n")
+sed(fs, "tcon(>=6.6)", r"(\tlength = security_context_to_sid_with_policy\(backup_sepolicy, tcon, strlen\(tcon\), &tsid, SECSID_NULL, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+    "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_to_sid(tcon, strlen(tcon), &tmp_sid, GFP_KERNEL);\n\t}\n")
+
+hk = "security/selinux/hooks.c"
+# 去掉无条件 SETCURRENT 检查（<6.6 带 &selinux_state；>=6.6 不带）
+sed(hk, "rm_early(<6.6)", r"\terror = avc_has_perm\(&selinux_state,\n\t\t\t\t     mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL\);\n\n\tif \(error\)\n\t\treturn error;\n\n", "")
+sed(hk, "rm_early(>=6.6)", r"\terror = avc_has_perm\(mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL\);\n\n\tif \(error\)\n\t\treturn error;\n\n", "")
+# 仅在 backup 解析失败时才检查 SETCURRENT，并同步全局 sidtab
+sed(hk, "seq+sync(<6.6)", r"(\t\terror = security_context_to_sid\(&fake_state, value, size,\n\t\t\t\t\t\t&sid, GFP_KERNEL\);\n)\t\tif \(error\)\n\t\t\treturn error;\n",
+    "\\1\t\tif (error) {\n\t\t\t/* FOLKSU_SEQ: 仅当 backup 解析失败时才做 SETCURRENT 检查（KernelSU df03912f） */\n\t\t\tint perm_error = avc_has_perm(&selinux_state, mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n\t\t{\n\t\t\tu32 tmp_sid;\n\t\t\t/* FOLKSU_SIDTAB_SYNC (KernelSU #3873) */\n\t\t\tsecurity_context_to_sid(&selinux_state, value, size, &tmp_sid, GFP_KERNEL);\n\t\t}\n")
+sed(hk, "seq+sync(>=6.6)", r"(\t\terror = security_context_to_sid_with_policy\(backup_sepolicy, str, size, &sid, SECSID_NULL, GFP_KERNEL\);\n)\t\tif \(error\)\n\t\t\treturn error;\n",
+    "\\1\t\tif (error) {\n\t\t\t/* FOLKSU_SEQ: 仅当 backup 解析失败时才做 SETCURRENT 检查（KernelSU df03912f） */\n\t\t\tint perm_error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n\t\t{\n\t\t\tu32 tmp_sid;\n\t\t\t/* FOLKSU_SIDTAB_SYNC (KernelSU #3873) */\n\t\t\tsecurity_context_to_sid(str, size, &tmp_sid, GFP_KERNEL);\n\t\t}\n")
 PYEOF
   grep -n 'FOLKSU_SIDTAB_SYNC' security/selinux/selinuxfs.c | head
   grep -n 'FOLKSU_SIDTAB_SYNC\|FOLKSU_SEQ' security/selinux/hooks.c | head
