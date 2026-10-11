@@ -422,6 +422,53 @@ else
   echo "::warning::未找到 SUSFS 的 my_write_context/my_setprocattr，跳过 SELinux 侧信道移植"
 fi
 
+# ==================== SUSFS 路径隐藏回退（跨命名空间 / FUSE） ====================
+# susfs_add_sus_path（非 loop）在“调用方命名空间”里 kern_path 解析路径；管理器/ksud 常解析不到
+# /storage/emulated 这类 FUSE 路径（-ENOENT），于是规则加不进去、路径隐藏失效。
+# 这里加回退：解析失败时自动改走 LOOP 机制（内核 workqueue 在 init 命名空间稍后解析并打标记）。
+if [ -f fs/susfs.c ] && grep -qF 'void susfs_add_sus_path(void __user **user_info)' fs/susfs.c \
+  && ! grep -qF 'FOLKSU_SUS_PATH_LOOP_FALLBACK' fs/susfs.c; then
+  python3 - <<'PYEOF'
+p = "fs/susfs.c"
+s = open(p, encoding="utf-8", errors="surrogateescape").read()
+old1 = "void susfs_add_sus_path(void __user **user_info) {"
+new1 = "void susfs_add_sus_path_loop(void __user **user_info);\n" + old1
+if s.count(old1) != 1:
+    print("::warning::fs/susfs.c: susfs_add_sus_path 签名不是预期形态，跳过")
+else:
+    s = s.replace(old1, new1, 1)
+    old2 = ("\tif (copy_from_user(&info, (struct st_susfs_sus_path __user*)*user_info, sizeof(info))) {\n"
+            "\t\tinfo.err = -EFAULT;\n"
+            "\t\tgoto out_copy_to_user;\n"
+            "\t}\n\n"
+            "\tinfo.err = kern_path(info.target_pathname, LOOKUP_FOLLOW, &path);\n"
+            "\tif (info.err) {\n"
+            "\t\tSUSFS_LOGE(\"failed opening file '%s'\\n\", info.target_pathname);\n"
+            "\t\tgoto out_copy_to_user;\n"
+            "\t}\n")
+    new2 = ("\tif (copy_from_user(&info, (struct st_susfs_sus_path __user*)*user_info, sizeof(info))) {\n"
+            "\t\tinfo.err = -EFAULT;\n"
+            "\t\tgoto out_copy_to_user;\n"
+            "\t}\n\n"
+            "\tinfo.err = kern_path(info.target_pathname, LOOKUP_FOLLOW, &path);\n"
+            "\tif (info.err) {\n"
+            "\t\tSUSFS_LOGE(\"failed opening '%s' in current ns, fallback to sus_path_loop\\n\", info.target_pathname);\n"
+            "\t\t/* FOLKSU_SUS_PATH_LOOP_FALLBACK: 调用方命名空间解析不到（常见于 /storage/emulated 等 FUSE 路径）时，\n"
+            "\t\t   退回 LOOP 机制，交由内核 workqueue 在 init 命名空间稍后解析并重新打标记 */\n"
+            "\t\tsusfs_add_sus_path_loop(user_info);\n"
+            "\t\treturn;\n"
+            "\t}\n")
+    if s.count(old2) != 1:
+        print("::warning::fs/susfs.c: susfs_add_sus_path 代码形态不是预期，跳过回退")
+    else:
+        open(p, "w", encoding="utf-8", errors="surrogateescape").write(s.replace(old2, new2, 1))
+        print("fs/susfs.c: 已加 SUSFS 路径隐藏 LOOP 回退")
+PYEOF
+  grep -n 'FOLKSU_SUS_PATH_LOOP_FALLBACK' fs/susfs.c | head
+else
+  echo "::warning::未找到 fs/susfs.c 的 susfs_add_sus_path，跳过路径隐藏回退"
+fi
+
 # 为尚未提供 SU 会话 FD 接口的 SukiSU/BakaSU 恢复旧版 exec hook 行为
 EXEC_HELPER=""
 if [[ "$KSU_VARIANT" == SukiSU* || "$KSU_VARIANT" == "BakaSU" ]]; then
