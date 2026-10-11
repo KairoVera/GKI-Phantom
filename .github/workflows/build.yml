@@ -618,8 +618,8 @@ jobs:
               ;;
             "FolkSU")
               echo "添加 FolkSU..."
-              # 固定到 FolkSU v0.1.0-beta3（提交数 2787 → KSU 版本 32787），与最新管理器 Release 对齐
-              FOLKSU_PINNED_REF="6172b71e2e1c12fb3fbf023f310ecac3be041fc5"
+              # 固定到 FolkSU v0.1.0-beta4（提交数 2792 → KSU 版本 32792），与最新管理器 Release 对齐
+              FOLKSU_PINNED_REF="49819d2c55cd6b3e02aef8a1efaaf3f10e562ca9"
               git clone https://github.com/LyraVoid/FolkSU.git KernelSU
               git -C KernelSU checkout "$FOLKSU_PINNED_REF"
               # 注入 FolkSU 管理器签名（第二签名槽，与 FolkSU 上游 build.sh 的做法一致）：
