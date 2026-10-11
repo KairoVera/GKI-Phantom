@@ -369,6 +369,62 @@ fi
 
 patch -p1 < "$SUSFS_PATCH" || true
 
+# ==================== 移植 KernelSU 的 SELinux 隐藏侧信道修复 ====================
+# 检测方把 /sys/fs/selinux/{context,access} 与 setprocattr 当 oracle：比对
+# 假策略(fake_state)与全局 selinux_state 的 SID、以及权限检查顺序，来识别隐藏。
+# SUSFS 主补丁实现的 my_write_context / my_write_access / my_setprocattr 缺这两点，
+# 这里按 KernelSU 的做法补齐：
+#   - sidtab 同步（KernelSU #3873）：用假策略解析后再同步进全局 sidtab，消除 SID 差异；
+#   - 权限检查顺序（KernelSU df03912f）：仅当 backup 解析失败时才做 SETCURRENT 检查。
+if [ -f security/selinux/selinuxfs.c ] && grep -q 'static ssize_t my_write_context' security/selinux/selinuxfs.c \
+  && [ -f security/selinux/hooks.c ] && grep -q 'static int my_setprocattr' security/selinux/hooks.c; then
+  python3 - <<'PYEOF'
+import re, sys
+
+def edit(path, ops):
+    src = open(path, encoding="utf-8", errors="surrogateescape").read()
+    for name, pat, repl, cnt in ops:
+        new, n = re.subn(pat, repl, src, count=cnt)
+        if n != cnt:
+            sys.stderr.write("::error::%s: '%s' matched %d expected %d\n" % (path, name, n, cnt))
+            sys.exit(1)
+        src = new
+    open(path, "w", encoding="utf-8", errors="surrogateescape").write(src)
+    print("%s: applied -> %s" % (path, ", ".join(o[0] for o in ops)))
+
+fs = [
+    ("ctx.sync",
+     r"(\tlength = security_context_to_sid\(&fake_state, buf, size, &sid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+     "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC: sync to global sidtab (KernelSU #3873) */\n\t\tsecurity_context_to_sid(&selinux_state, buf, size, &tmp_sid, GFP_KERNEL);\n\t}\n",
+     1),
+    ("scon.sync",
+     r"(\tlength = security_context_str_to_sid\(&fake_state, scon, &ssid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+     "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, scon, &tmp_sid, GFP_KERNEL);\n\t}\n",
+     1),
+    ("tcon.sync",
+     r"(\tlength = security_context_str_to_sid\(&fake_state, tcon, &tsid, GFP_KERNEL\);\n\tif \(length\)\n\t\tgoto out;\n)",
+     "\\1\t{\n\t\tu32 tmp_sid;\n\t\t/* FOLKSU_SIDTAB_SYNC */\n\t\tsecurity_context_str_to_sid(&selinux_state, tcon, &tmp_sid, GFP_KERNEL);\n\t}\n",
+     1),
+]
+hk = [
+    ("rm_early_setcurrent",
+     r"\terror = avc_has_perm\(&selinux_state,\n\t\t\t\t     mysid, mysid, SECCLASS_PROCESS,\n\t\t\t\t     PROCESS__SETCURRENT, NULL\);\n\n\tif \(error\)\n\t\treturn error;\n\n",
+     "",
+     1),
+    ("seq+sync",
+     r"(\t\terror = security_context_to_sid\(&fake_state, value, size,\n\t\t\t\t\t\t&sid, GFP_KERNEL\);\n)\t\tif \(error\)\n\t\t\treturn error;\n",
+     "\\1\t\tif (error) {\n\t\t\t/* FOLKSU_SEQ: 仅当 backup 解析失败时才做 SETCURRENT 检查（KernelSU df03912f） */\n\t\t\tint perm_error = avc_has_perm(&selinux_state, mysid, mysid,\n\t\t\t\t\t\t      SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);\n\t\t\treturn perm_error ?: error;\n\t\t}\n\t\t{\n\t\t\tu32 tmp_sid;\n\t\t\t/* FOLKSU_SIDTAB_SYNC (KernelSU #3873) */\n\t\t\tsecurity_context_to_sid(&selinux_state, value, size, &tmp_sid, GFP_KERNEL);\n\t\t}\n",
+     1),
+]
+edit("security/selinux/selinuxfs.c", fs)
+edit("security/selinux/hooks.c", hk)
+PYEOF
+  grep -n 'FOLKSU_SIDTAB_SYNC' security/selinux/selinuxfs.c | head
+  grep -n 'FOLKSU_SIDTAB_SYNC\|FOLKSU_SEQ' security/selinux/hooks.c | head
+else
+  echo "::warning::未找到 SUSFS 的 my_write_context/my_setprocattr，跳过 SELinux 侧信道移植"
+fi
+
 # 为尚未提供 SU 会话 FD 接口的 SukiSU/BakaSU 恢复旧版 exec hook 行为
 EXEC_HELPER=""
 if [[ "$KSU_VARIANT" == SukiSU* || "$KSU_VARIANT" == "BakaSU" ]]; then
